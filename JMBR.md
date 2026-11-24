@@ -111,10 +111,23 @@ that it boots and pushes:
   release)
 - `ghcr.io/<owner>/actual-server:vX.Y.Z-jmbr.<commit>` (never moves; pin this)
 
-It uses the workflow's own `GITHUB_TOKEN`, no extra secrets. The first push
-creates the package as private: make it public under the owner's profile →
-Packages → `actual-server` → Package settings → Change visibility, or log the
-server in to `ghcr.io` with a token that can read packages.
+It uses the workflow's own `GITHUB_TOKEN`, no extra secrets.
+
+**The package stays private.** The first push creates it as private. Leave it
+that way: do not change its visibility, and note that GitHub does not allow a
+public package to be made private again. To check, open the owner's profile →
+Packages → `actual-server`; it must show "Private".
+
+Because it is private, the server that runs it has to log in before it can
+pull:
+
+```sh
+docker login ghcr.io -u <owner> --password-stdin
+```
+
+Use a personal access token (classic) with only the `read:packages` scope.
+Docker keeps it on that server; it never goes in this repository, in a compose
+file or in chat.
 
 ## GitHub settings this relies on
 
