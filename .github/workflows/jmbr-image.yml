@@ -1,0 +1,71 @@
+name: jmbr / server image
+
+# Fork-only workflow (see JMBR.md). Manual: build the sync-server image from a
+# jmbr-based ref and publish it to this account's GitHub Container Registry.
+# Only needed once jmbr carries real code patches.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or commit to build (must contain the jmbr files)
+        required: false
+        type: string
+        default: jmbr
+      push:
+        description: Push to ghcr.io/<owner>/actual-server
+        required: false
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  image:
+    name: Build server image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # vX.Y.Z-jmbr moves with every build of that release;
+      # vX.Y.Z-jmbr.<commit> never moves, so pin production to that one.
+      - name: Work out the image tags
+        id: meta
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/actual-server"
+          version=$(jq -r .version packages/sync-server/package.json)
+          commit=$(git rev-parse --short=7 HEAD)
+          {
+            echo 'tags<<EOF'
+            echo "$image:v$version-jmbr"
+            echo "$image:v$version-jmbr.$commit"
+            echo 'EOF'
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Build and boot the server image
+        uses: ./.github/actions/jmbr-server-image
+        with:
+          tags: ${{ steps.meta.outputs.tags }}
+
+      - name: Login to GitHub Container Registry
+        if: inputs.push
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        if: inputs.push
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          for tag in $TAGS; do
+            docker push "$tag"
+          done

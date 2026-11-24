@@ -1,0 +1,117 @@
+name: jmbr / upstream release check
+
+# Fork-only workflow (see JMBR.md). Once a day: is there an upstream release
+# newer than the one this branch is based on? If so, rebase onto it, build the
+# server image as a check, and open a pull request (or an issue) as the notice.
+
+on:
+  schedule:
+    - cron: '23 9 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Upstream tag to sync to (default is the newest release)
+        required: false
+        type: string
+      redo:
+        description: Repeat a release that already has a pull request or issue
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches:
+      - jmbr
+
+permissions: {}
+
+concurrency:
+  group: jmbr-upstream-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  JMBR_TAG: ${{ inputs.tag }}
+  JMBR_REDO: ${{ inputs.redo }}
+
+jobs:
+  guard:
+    name: Keep inherited workflows off
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      # Upstream's workflows come along with every release. They need
+      # upstream's secrets and runners, so only the jmbr-* ones may run here.
+      - name: Disable every workflow that is not ours
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows" --jq '
+            .workflows[]
+            | select(.state == "active")
+            | select(.path | startswith(".github/workflows/"))
+            | select(.path | startswith(".github/workflows/jmbr-") | not)
+            | "\(.id) \(.path)"' |
+            while read -r id path; do
+              echo "Disabling $path"
+              gh api --silent -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$id/disable"
+            done
+
+      # GitHub switches scheduled workflows off after 60 days without
+      # repository activity. Re-enabling resets that clock.
+      - name: Keep this schedule alive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --silent -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/jmbr-upstream-release.yml/enable"
+
+  check:
+    name: Check for a new release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      tag: ${{ steps.detect.outputs.tag }}
+      rebase: ${{ steps.rebase.outputs.rebase }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Compare with upstream's newest release
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/jmbr/upstream-release.sh detect
+
+      - name: Rebase onto the new release
+        id: rebase
+        if: steps.detect.outputs.tag != ''
+        env:
+          TAG: ${{ steps.detect.outputs.tag }}
+        run: .github/jmbr/upstream-release.sh rebase "$TAG"
+
+      - name: Build and boot the server image
+        if: steps.rebase.outputs.rebase == 'clean'
+        uses: ./.github/actions/jmbr-server-image
+
+  # Separate job: this one may write to the repository, so it runs git and gh
+  # only, never the code that was just fetched from upstream.
+  notify:
+    name: Open the upgrade pull request
+    needs: check
+    if: always() && needs.check.outputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Open the pull request, or an issue if that is not possible
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JMBR_TAG: ${{ needs.check.outputs.tag }}
+          JMBR_BUILD: ${{ needs.check.outputs.rebase != 'clean' && 'skipped' || needs.check.result }}
+        run: .github/jmbr/upstream-release.sh notify
